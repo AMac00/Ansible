@@ -1,0 +1,534 @@
+- name: 'configure centos for ansible, mongodb, elasticsearch, logstash and kibana'
+  gather_facts: yes
+  hosts: ansible
+  vars_files:
+    - group_vars/main.yml
+  tasks:
+
+    - name: 'Upgrade all local system packages'
+      yum:
+        name: '*'
+        state: latest
+      become: yes
+
+#Install PGP Files
+    - name: 'Add Elastic’s signing key'
+      rpm_key:
+        key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+        validate_certs: yes
+      retries: 3
+      delay: 3
+      register: elastic_key_added
+
+    - debug:
+        msg: '{{ elastic_key_added }}'
+
+# ###Create repo files
+    - name: 'Create /etc/yum.repos.d/{{ item }}'
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/yum.repos.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+       - mongodb-org-4.2.repo
+       - elasticsearch.repo
+       - logstash.repo
+       - kibana.repo
+
+##Create firewalld rules
+    - name: 'Validate firewalld is running'
+      systemd:
+        state: started
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - firewalld
+
+    - name: 'Open required local firewall ports'
+      firewalld:
+        port: '{{ item }}/tcp'
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - 80
+        - 443
+        - 9200
+        - 5601
+        - 8445
+        - 8443
+        - 2727
+
+##Install Services
+    - name: 'Install-Update the latest version of local software {{ item }}'
+      yum:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - epel-release
+        - sssd 
+        - realmd
+        - oddjob
+        - oddjob-mkhomedir
+        - adcli
+        - samba-common
+        - samba-common-tools 
+        - krb5-workstation
+        - openldap-clients
+        - policycoreutils-python
+        - nginx
+        - ntp
+        - git
+        - mongodb-org 
+        - logstash
+        - elasticsearch
+        - kibana
+        - python-pip
+        - python-wheel
+        - python36
+        - python36-devel
+        - python36-wheel
+        - ansible
+        - gcc
+        - python-devel
+        - krb5-devel
+        - krb5-libs 
+        - java-openjdk
+        - java-latest-openjdk-devel
+        - tree
+
+    - name: 'Add logstash service'
+      command: /bin/bash -c "/usr/share/logstash/bin/system-install /etc/logstash/startup.options systemd"
+      register: logstash_service_add
+
+    - name: 'Enable local services {{ item }}'
+      systemd:
+        state: started
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - ntpd
+        - mongod
+        - nginx
+        - elasticsearch
+        - kibana
+        - logstash
+
+    - name: 'Upgrade Python2 pip {{ item }}'
+      pip: 
+        name: '{{ item }}'
+        state: forcereinstall
+      loop:
+        - pip
+        - setuptools
+
+    - name: 'Install Python2 libraries using pip {{ item }}'
+      pip:
+        name: '{{ item }}'
+        executable: pip2
+      loop:
+        - pexpect
+        - pywinrm[kerberos]
+        - ansible-runner
+        - git+https://github.com/vmware/vsphere-automation-sdk-python.git
+        - pymongo
+        - python-logstash
+
+    - name: 'Upgrade Python3 pip {{ item }}'
+      pip:
+        name: pip
+        executable: pip3
+        state: latest
+
+## Install PIP3 requirements - gunicorn
+    - name: 'Install Python3 libraries using  pip3 {{ item }}'
+      pip:
+        name: '{{ item }}'
+        state: forcereinstall
+        executable: pip3
+      loop:
+        - gunicorn
+        - pymongo
+        - python-logstash
+
+# Configure MongoDB
+
+    - name: 'MongoDB - connect to mongo with defaults 2727'
+      command: mongo --port 2727
+      args:
+        stdin: exit
+      ignore_errors: yes
+      register: mongo_connection_status
+      changed_when: "'do not flag as changed as it fails' in mongo_connection_status"
+
+    - block:
+
+      - name: 'MongoDB - Connection to port 2727 failed, lets run setup for 27017'
+        debug:
+          msg: '{{ mongo_connection_status.stdout_lines }}'
+
+      - name: 'MongoDB - connect to mongo with defaults 27017'
+        command: mongo --port 27017
+        args:
+          stdin: exit
+        register: mongo_connection_27017_status
+        failed_when: "'exception: connect failed' in mongo_connection_27017_status.stdout"
+        changed_when: "'do not flag as changed' in mongo_connection_27017_status"
+
+
+      # add a user to database in a replica set, the primary server is automatically discovered and written to
+      - name: 'MongoDB - Add Admin user to databases'
+        mongodb_user:
+          database: admin
+          name: '{{ ansible_mongo_user }}'
+          password: '{{ ansible_mongo_pass }}'
+          roles: readWriteAnyDatabase
+          state: present
+
+      - name: 'MongoDB - Add Admin user to databases'
+        mongodb_user:
+          database: admin
+          name: '{{ lv_user }}'
+          password: '{{ lv_user_pass }}'
+          roles: readWriteAnyDatabase
+          state: present
+
+      - name: 'MongoDB - Disable monitoring message'
+        command: mongo --port 27017
+        args:
+          stdin: |
+            db.disableFreeMonitoring()
+            db.getFreeMonitoringStatus()
+            exit
+        register: mongo_disable_free
+        failed_when: "'exception:' in mongo_disable_free.stdout"
+
+      - name: 'MongoDB - Check if disabling the free monitoring message successful?'
+        debug:
+          msg: '{{ mongo_disable_free.stdout_lines }}'
+        failed_when: "'enabled' in mongo_disable_free.stdout"
+
+      when: "'exception: connect failed' in mongo_connection_status.stdout"
+
+
+##Copy config templates
+
+    - name: 'Copy ansible.conf template'
+      template:
+        src: templates/ansible/ansible.cfg
+        dest: /etc/ansible/ansible.cfg
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: 'Copy mongod.conf template'
+      template:
+        src: templates/mongod/mongod.conf
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restartmongod
+
+    - name: 'Copy nginx authentication files'
+      template:
+        src: 'nginx/{{ item }}'
+        dest: '/etc/nginx/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - htpasswd.users
+      notify:
+        - restartnginx
+
+    - name: 'Copy nginx site files'
+      template:
+        src: 'nginx/{{ item }}'
+        dest: '/etc/nginx/conf.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - lvapi.conf
+        - kibana.conf
+        - webpage.conf
+      notify:
+        - restartnginx
+
+    - name: 'Copy elk - logstash conf'
+      template:
+        src: 'logstash/filters/{{ item }}'
+        dest: '/etc/logstash/conf.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - 01-ansible.conf
+        - 11-ansible.conf
+        - 30-elasticsearch.conf
+      notify:
+        - restartlogstash
+
+    - name: 'Copy elk - logstash template files'
+      synchronize:
+        src: templates/logstash/filters
+        dest: /etc/logstash
+      notify:
+        - restartlogstash
+
+    - name: 'Copy elk - kibana conf'
+      template:
+        src: templates/kibana/kibana.yml
+        dest: /etc/kibana/kibana.yml
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restartkibana
+
+    - name: 'Copy elk - ElasticStack conf'
+      copy:
+        src: '../templates/elasticsearch/{{ item }}'
+        dest: '/etc/elasticsearch'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - users
+        - users_roles
+        - roles.yml
+        - role_mapping.yml
+        - log4j2.properties
+        - jvm.options
+        - elasticsearch.yml
+        - elasticsearch.keystore
+      notify:
+        - restartelasticsearch
+
+    - name: 'Restart services after template conf uploaded'
+      systemd:
+        state: restarted
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - ntpd
+        - mongod
+        - nginx
+        - elasticsearch
+        - kibana
+        - logstash
+      register: service_status
+
+##Service validation
+
+    - name: 'Report ntp time syncstatus'
+      shell: ntpstat
+      register: ntp_status
+    
+    - debug:
+        msg: '{{ ntp_status.stdout_lines }}'
+
+    - name: 'Validate nginx responds with 200OK'
+      uri:
+        url: '{{ nginx_url }}'
+        follow_redirects: none
+        method: GET
+      register: nginx_result
+      until: nginx_result.status == 200
+      retries: 10 
+      delay: 3
+
+    - debug:
+        msg: '{{ nginx_result.status, nginx_result.url, nginx_result.server }}'
+      ignore_errors: yes
+
+    - name: 'Validate kibana responds with 200OK'
+      uri:
+        url: '{{ kibana_url }}'
+        follow_redirects: none
+        method: GET
+      register: kibana_result
+      until: kibana_result.status == 200
+      retries: 10 
+      delay: 5
+
+    - debug:
+        msg: '{{ kibana_result.status, kibana_result.url, kibana_result.kbn_name }}'
+      ignore_errors: yes
+
+    - name: 'Reboot the machine with all defaults'
+      reboot:
+
+##Join Server to Domain
+
+    - name: 'Domain - Check if server is joined to the domain'
+      command: realm list
+      register: os_join
+      failed_when: "'exception: connect failed' in os_join.stdout"
+      changed_when: "'realm-name' not in os_join.stdout"
+
+    - block:
+
+        - name: 'Domain - join centos box to domain'
+          expect:
+            command: /bin/bash -c "/usr/sbin/realm join {{ realm }} --user={{ realm_admin }} --computer-ou={{ ou_membership }}"
+            responses:
+              Password.*: "{{ pass }}"
+
+        - name: 'Domain - Allow User Login without FQDN'
+          lineinfile:
+            backup: yes
+            state: present
+            dest: /etc/sssd/sssd.conf
+            regexp: '^{{ item.search }}'
+            line: '{{ item.replace }}'
+          with_items:
+            - { search: 'use_fully_qualified_names', replace: 'use_fully_qualified_names = False' }
+            - { search: 'fallback_homedir', replace: 'fallback_homedir = /home/%u' }
+
+        - name: 'Domain - Create sudoers'
+          file:
+            path: /etc/sudoers.d/sudoers
+            owner: root
+            group: root
+            mode: '0644'
+            state: touch
+
+        - name: 'Domain - Updating sudoers for Enterprise Admins AD group'
+          lineinfile:
+            path: /etc/sudoers.d/sudoers
+            state: present
+            line: '%{{ short_realm }}\\Enterprise\ Admins       ALL=(ALL) ALL'
+            validate: 'visudo -cf %s'
+          notify:
+            - restartsssd
+
+      when: "'realm-name' not in os_join.stdout"
+
+# Copy Helloworld
+    - name: copy Helloworld and template playbooks
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/ansible/{{ item }}'
+        owner: root
+        group: root
+        mode: 0777
+      loop:
+        - helloworld.yml
+
+# Add API Processes
+    # Create API User and Group
+    - name: 'API - Create Service Group'
+      group:
+        name: lvgroup
+        state: present
+      tags:
+        - api
+
+    # Create API user accoutn
+    - name: 'API - Create API User service account'
+      user:
+        name: lvuser
+        groups: lvgroup
+        shell: /sbin/nologin
+        append: yes
+        comment: "LVuser nologin User"
+        state: present
+      become: true
+      tags:
+        - api
+
+    # Copy API Template
+    - name: 'API - Copy backend service files'
+      copy:
+        owner: root
+        group: lvgroup
+        src: /var/logvisualizer/lv_backend
+        dest: /var/logvisualizer
+      tags:
+        - api
+
+    ## Install LVAPI PIP3 requirements - gunicorn
+    - name: 'Install API Python3 libraries using pip3 {{ item }}'
+      pip:
+        name: '{{ item }}'
+        state: forcereinstall
+        executable: pip3
+      loop:
+        - gunicorn
+        - lxml==4.5.0
+        - bs4
+        - requests
+        - paramiko
+        - paramiko-expect
+        - flask
+        - flask_session
+        - flask_cors
+        - flask_bcrypt
+        - flask_jwt_extended
+        - flask_restx
+        - flask_restplus
+        - flask_pymongo
+        - apis
+        - bson
+        - gunicorn
+        - Werkzeug==0.16.1
+        - ansible_runner
+      tags:
+        - api
+
+    # Copy API Service File
+    - name: 'API - Copy backend service file '
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/systemd/system/{{ item }}'
+        owner: root
+        group: root
+      loop:
+        - lvapi.service
+      notify:
+        - restartlvapi
+      tags:
+        - api
+
+##service handlers
+  handlers:
+  - name: restartmongod
+    service:
+      name: mongod
+      state: restarted
+
+  - name: restartnginx
+    service:
+      name: nginx
+      state: restarted
+
+  - name: restartlogstash
+    service:
+      name: logstash
+      state: restarted
+
+  - name: restartkibana
+    service:
+      name: kibana
+      state: restarted
+
+  - name: restartelasticsearch
+    service:
+      name: elasticsearch
+      state: restarted
+
+  - name: restartsssd
+    service:
+      name: sssd
+      state: restarted
+
+  - name: restartlvapi
+    service:
+      name: lvapi
+      state: restarted

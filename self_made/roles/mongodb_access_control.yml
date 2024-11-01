@@ -1,0 +1,51 @@
+- name: 'standalone mongodb configuration for ansible fact caching'
+  gather_facts: no
+  hosts: ansible
+  # debugger: always
+  vars_files:
+    - ../group_vars/main.yml
+  tasks:
+
+##move this to javascript
+##https://docs.mongodb.com/manual/tutorial/write-scripts-for-the-mongo-shell/
+
+    - name: 'connect to mongo with defaults'
+      command: mongo --port 2727
+      args:
+        stdin: exit
+      register: mongo_connection_status
+      failed_when: "'exception: connect failed' in mongo_connection_status.stdout"
+
+    - name: 'connectivity test result'
+      debug:
+        msg: '{{ mongo_connection_status.stdout_lines }}'
+
+    - name: 'connect to mongo and disable monitoring message'
+      command: mongo --port 2727
+      args:
+        stdin: |
+          db.disableFreeMonitoring()
+          db.getFreeMonitoringStatus()
+          exit
+      register: mongo_disable_free
+      failed_when: "'exception:' in mongo_disable_free.stdout"
+
+    - name: 'was disabling the free monitoring message successful?'
+      debug:
+        msg: '{{ mongo_disable_free.stdout_lines }}'
+      failed_when: "'enabled' in mongo_disable_free.stdout"
+
+    - name: 'copy mongo access_control.js'
+      template:
+        src: ../files/mongodb_js/access_control.js
+        dest: /tmp/access_control.js
+
+    - name: 'connect to mongo and create readWrite user in ansible_db'
+      command: mongo localhost:2727/ansible_db access_control.js
+      args:
+        chdir: /tmp
+      register: mongo_user_create_status
+      failed_when: "'exception:' in mongo_user_create_status.stdout"
+
+    - debug:
+        msg: '{{ mongo_user_create_status.stdout_lines }}'

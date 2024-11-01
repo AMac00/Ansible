@@ -1,0 +1,22 @@
+---
+- name: 'wxcce-6.7'
+  gather_facts: no
+  hosts: nfs
+  serial: 1
+  vars:
+    customize: false
+    validate_certs: false
+  collections:
+    - awx.awx
+    - vmware.vmware_rest
+    - community.vmware
+    - community.vmware.vmware_export_ovf
+  tasks:
+    - name : 'Export vm'
+        hostname: '{{ vcenter_hostname }}'
+        username: '{{ vcenter_username }}'
+        password: '{{ vcenter_password }}'
+        name: '{{ vm_name }}'
+        export_with_images: true
+        export_dir: /path/to/ovf_template/
+        delegate_to: nfs

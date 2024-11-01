@@ -1,0 +1,356 @@
+- name: 'configure centos for ansible, mongodb, elasticsearch, logstash and kibana'
+  gather_facts: yes
+  hosts: ansible
+  vars_files:
+    - group_vars/main.yml
+  tasks:
+
+    - name: upgrade all packages
+      yum:
+        name: '*'
+        state: latest
+      become: yes
+
+#Install PGP Files
+    - name: Add Elastic’s Signing Key
+      rpm_key:
+        key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+        validate_certs: yes
+      retries: 3
+      delay: 3
+      register: elastic_key_added
+
+    - debug:
+        msg: '{{ elastic_key_added }}'
+
+# ###Create repo files
+    - name: 'create /etc/yum.repos.d/{{ item }}'
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/yum.repos.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+       - mongodb-org-4.2.repo
+       - elasticsearch.repo
+       - logstash.repo
+       - kibana.repo
+
+##Create firewalld rules
+    - name: 'make sure firewalld is running'
+      systemd:
+        state: started
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - firewalld
+
+    - name: 'open local firewalld ports'
+      firewalld:
+        port: '{{ item }}/tcp'
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - 80
+        - 443
+        - 9200
+        - 5601
+        - 8445
+        - 8443
+        - 2727
+##Install Services
+    - name: 'install the latest version of {{ item }}'
+      yum:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - epel-release
+        - sssd 
+        - realmd
+        - oddjob
+        - oddjob-mkhomedir
+        - adcli
+        - samba-common
+        - samba-common-tools 
+        - krb5-workstation
+        - openldap-clients
+        - policycoreutils-python
+        - nginx
+        - ntp
+        - git
+        - mongodb-org 
+        - logstash
+        - elasticsearch
+        - kibana
+        - python-pip
+        - python3
+        - ansible
+        - python-wheel
+        - gcc
+        - python-devel
+        - krb5-devel
+        - krb5-libs 
+        - java-openjdk
+        - java-latest-openjdk-devel
+
+
+    - name: 'add logstash service'
+      command: /bin/bash -c "/usr/share/logstash/bin/system-install /etc/logstash/startup.options systemd"
+      register: logstash_service_add
+
+    - name: 'make sure services are enabled and start'
+      systemd:
+        state: started
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - ntpd
+        - mongod
+        - nginx
+        - elasticsearch
+        - kibana
+        - logstash
+
+    - name: 'upgrade pip {{ item }}'
+      pip: 
+        name: '{{ item }}'
+        state: forcereinstall
+      loop:
+        - pip
+        - setuptools
+
+    - name: 'install Python2 stuff using pip'
+      pip:
+        name: '{{ item }}'
+      loop:
+        - pexpect
+        - pywinrm[kerberos]
+        - ansible-runner
+        - git+https://github.com/vmware/vsphere-automation-sdk-python.git
+        - pymongo
+        - python-logstash
+
+## Install PIP3 requirements - gunicorn
+    - name: 'install Python3 stuff using  pip3 {{ item }}'
+      pip:
+        name: '{{ item }}'
+        state: forcereinstall
+        executable: pip3
+      loop:
+        - gunicorn
+        - pymongo
+        - python-logstash
+
+
+##Copy config templates
+
+    - name: copy mongod.conf template
+      copy:
+        src: ansible.cfg
+        dest: /etc/ansible/ansible.cfg
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: copy mongod.conf template
+      copy:
+        src: mongod.conf
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restartmongod
+
+    - name: copy nginx authentication files
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/nginx/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - htpasswd.users
+      notify:
+        - restartnginx
+
+    - name: copy nginx site files 
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/nginx/conf.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - lvapi.conf
+        - kibana.conf
+        - webpage.conf
+      notify:
+        - restartnginx
+
+    - name: copy elk conf files logstash conf
+      copy:
+        src: '{{ item }}'
+        dest: '/etc/logstash/conf.d/{{ item }}'
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - 01-ansible.conf
+        - 30-elasticsearch.conf
+      notify:
+        - restartlogstash
+
+    - name: copy kibana.yml template
+      copy:
+        src: kibana.yml
+        dest: /etc/kibana/kibana.yml
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restartkibana
+
+    - name: sync logstash config directories from templates
+      synchronize:
+        src: files/logstash
+        dest: /etc/logstash
+      notify:
+        - restartlogstash
+
+    - name: sync elasticsearch config directories from templates
+      synchronize:
+        src: files/elasticsearch
+        dest: /etc/elasticsearch
+      notify:
+        - restartelasticsearch
+
+    - name: 'make sure services are restarted'
+      systemd:
+        state: restarted
+        name: '{{ item }}'
+        enabled: yes
+      loop:
+        - ntpd
+        - mongod
+        - nginx
+        - elasticsearch
+        - kibana
+        - logstash
+      register: service_status
+
+##Service validation
+
+    - name: report ntp time syncstatus
+      shell: ntpstat
+      register: ntp_status
+    
+    - debug:
+        msg: '{{ ntp_status.stdout_lines }}'
+
+    - name: 'validate nginx responds with 200OK'
+      uri:
+        url: '{{ nginx_url }}'
+        follow_redirects: none
+        method: GET
+      register: nginx_result
+      until: nginx_result.status == 200
+      retries: 10 
+      delay: 3
+
+    - debug:
+        msg: '{{ nginx_result.status, nginx_result.url, nginx_result.server }}'
+      ignore_errors: yes
+
+    - name: 'validate kibana responds with 200OK'
+      uri:
+        url: '{{ kibana_url }}'
+        follow_redirects: none
+        method: GET
+      register: kibana_result
+      until: kibana_result.status == 200
+      retries: 10 
+      delay: 5
+
+    - debug:
+        msg: '{{ kibana_result.status, kibana_result.url, kibana_result.kbn_name }}'
+      ignore_errors: yes
+
+    - name: Unconditionally reboot the machine with all defaults
+      reboot:
+
+    - name: Checking Domain Join status
+      shell: /bin/bash -c "/usr/sbin/realm discover {{ realm_server }}.{{ realm }} | grep sssd"
+      register: ad_status
+
+    - debug:
+        msg: '{{ ad_status }}clear'
+
+    - name: 'join centos box to domain'
+      expect:
+          command: /bin/bash -c "/usr/sbin/realm join {{ realm }} --user={{ realm_admin }} --computer-ou={{ ou_membership }}"
+          responses:
+              Password.*: "{{ pass }}"
+
+    - name: Allow User Login without FQDN
+      lineinfile: 
+        backup: yes
+        state: present
+        dest: /etc/sssd/sssd.conf
+        regexp: '^{{ item.search }}'
+        line: '{{ item.replace }}'
+      with_items:
+          - { search: 'use_fully_qualified_names', replace: 'use_fully_qualified_names = False' }
+          - { search: 'fallback_homedir', replace: 'fallback_homedir = /home/%u' }
+          
+    - name: 'create sudoers'
+      file:
+        path: /etc/sudoers.d/sudoers
+        owner: root
+        group: root
+        mode: '0644'
+        state: touch
+
+    - name: Updating sudoers for Enterprise Admins AD group
+      lineinfile: 
+        path: /etc/sudoers.d/sudoers
+        state: present
+        line: '%{{ short_realm }}\\Enterprise\ Admins       ALL=(ALL) ALL'
+        validate: 'visudo -cf %s'
+      notify:
+        - restartsssd
+
+##service handlers
+  handlers:
+  - name: restartmongod
+    service:
+      name: mongod
+      state: restarted
+
+  - name: restartnginx
+    service:
+      name: nginx
+      state: restarted
+
+  - name: restartlogstash
+    service:
+      name: logstash
+      state: restarted
+
+  - name: restartkibana
+    service:
+      name: kibana
+      state: restarted
+
+  - name: restartelasticsearch
+    service:
+      name: elasticsearch
+      state: restarted
+
+  - name: restartsssd
+    service:
+      name: sssd
+      state: restarted

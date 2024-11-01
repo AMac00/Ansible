@@ -1,0 +1,14 @@
+Lvapi.service
+[Unit]
+Description=Gunicorn service for Log Visualizer
+After=network.target
+
+[Service]
+User=root
+Group=lvgroup
+WorkingDirectory=/var/logvisualizer/lv_backend
+Environment="PATH=/var/logvisualizer/lv_backend"
+ExecStart=/usr/local/bin/gunicorn --workers 3 --bind unix:lvapi.sock -m 007 -t 600 wsgi:app
+
+[Install]
+WantedBy=multi-user.target

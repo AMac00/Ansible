@@ -1,0 +1,32 @@
+---
+- name: 'vcenter folder creation'
+  gather_facts: no
+  hosts: localhost
+  vars:
+    validate_certs: false
+  collections:
+    - awx.awx
+    - vmware.vmware_rest
+    - community.vmware
+    - community.windows
+  tasks:
+
+    - name : 1.0 Get VM UUID
+      vmware_guest_facts:
+        hostname: '{{ lookup("env", "VMWARE_HOST") }}'
+        username: '{{ lookup("env", "VMWARE_USER") }}'
+        password: '{{ lookup("env", "VMWARE_PASSWORD") }}'
+        datacenter: "{{ datacenter }}"
+        folder: "/{{datacenter}}/vm"
+        name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: vm_facts
+
+    - name: 2.0 Upgrade VMware Tools using uuid
+      community.vmware.vmware_guest_tools_upgrade:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        datacenter: "{{ datacenter_name }}"
+        uuid: "{{ vm_facts.instance.hw_product_uuid }}"
+      delegate_to: localhost

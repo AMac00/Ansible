@@ -1,0 +1,13 @@
+nginx_url: http://10.38.225.95
+kibana_url: http://10.38.225.95:5601/app/kibana
+realm_admin: jrybak
+realm_server: usaus01eloadc01
+realm: lab.local
+ou_membership: OU=Servers,DC=lab,DC=local
+short_realm: LAB
+pass: S1pdsesh135!@#
+ansible_mongo_user: ansible
+ansible_mongo_pass: password@123
+ansible_mongo_pass_char: password%40123
+lv_user : lvuser
+lv_user_pass : password@123

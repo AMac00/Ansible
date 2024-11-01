@@ -1,0 +1,50 @@
+- name: 'Install Extras - Test file'
+  gather_facts: no
+  hosts: ansible
+  vars_files:
+    - group_vars/main.yml
+  tasks:
+# Configure MongoDB
+    - name: 'Domain - Check if server is joined to the domain'
+      command: realm list
+      register: os_join
+      failed_when: "'exception: connect failed' in os_join.stdout"
+      changed_when: "'realm-name' not in os_join.stdout"
+
+    - block:
+
+        - name: 'Domain - join centos box to domain'
+          expect:
+            command: /bin/bash -c "/usr/sbin/realm join {{ realm }} --user={{ realm_admin }} --computer-ou={{ ou_membership }}"
+            responses:
+              Password.*: "{{ pass }}"
+
+        - name: 'Domain - Allow User Login without FQDN'
+          lineinfile:
+            backup: yes
+            state: present
+            dest: /etc/sssd/sssd.conf
+            regexp: '^{{ item.search }}'
+            line: '{{ item.replace }}'
+          with_items:
+            - { search: 'use_fully_qualified_names', replace: 'use_fully_qualified_names = False' }
+            - { search: 'fallback_homedir', replace: 'fallback_homedir = /home/%u' }
+
+        - name: 'Domain - Create sudoers'
+          file:
+            path: /etc/sudoers.d/sudoers
+            owner: root
+            group: root
+            mode: '0644'
+            state: touch
+
+        - name: 'Domain - Updating sudoers for Enterprise Admins AD group'
+          lineinfile:
+            path: /etc/sudoers.d/sudoers
+            state: present
+            line: '%{{ short_realm }}\\Enterprise\ Admins       ALL=(ALL) ALL'
+            validate: 'visudo -cf %s'
+          notify:
+            - restartsssd
+
+      when: "'realm-name' not in os_join.stdout"
